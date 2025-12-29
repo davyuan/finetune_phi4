@@ -20,7 +20,7 @@ The task boils down to classifying if an user input is safe or unsafe. There are
 
 I'm instead finetuning LLM as a classifier. I'm using the logits of LLM's last layer and add on a classification head to project them from the LLM's hidden dim to the number of classes. The result is pretty impressive. It is safe to say it beats [Llama Guard 2](https://arxiv.org/pdf/2312.06674) and its successors by a long shot. 
 
-I'm not going to say this may be the SOTA in this field as I don't have enough time to test all of other models out there and there is not a public leaderboard. But I did try a few examples with other vendors' API, such as [Azure Content Safety API](https://learn.microsoft.com/en-us/azure/ai-services/content-safety/), and my model actually works better in my tests as well. 
+I'm not going to say this is the SOTA in this field as I don't have enough time to test all of other models out there and there is not a public leaderboard. But I did try a few examples with other vendors' API, such as [Azure Content Safety API](https://learn.microsoft.com/en-us/azure/ai-services/content-safety/), and my model actually works better in my tests as well. 
 
 ## Different approaches to finetune
 There are different ways to finetune a LLM for classification. 
@@ -84,6 +84,14 @@ Obviously this won't work on my RTX 4090 (23G) without quantization. Fortunately
     )
 ```
 
+In QLoRA finetuning, due to the sheer size of the model, the gradients, and optimizer states, I'd also made a few changes in code to make the training smoother. 
+
+- Lower the learning rate to 1e-4 initially and to decay it linearly to 5e-6 in the end.
+- Lower the batch size to 1 so the activation mem can fit in on my RTX 4090s.
+- GRADIENT_ACCUMULATION_STEPS is set to 4, so I can stablize the training, with batch size of 1. 
+- Increase the training epoch to 2.  
+
+Details of these changes can be found in [FT_Phi4_ContentSafety_QLoRA_train.py](./FT_Phi4_ContentSafety_peft_train.py)
 
 ## Training dataset
 I'm using the public dataset [ToxicChat](https://huggingface.co/datasets/lmsys/toxic-chat) for training and evaluation. This way I can easily compare my results with other model's performance. 
@@ -91,7 +99,7 @@ I'm using the public dataset [ToxicChat](https://huggingface.co/datasets/lmsys/t
 ## Result
 I'm using the [Llama2 Guard 2](https://arxiv.org/pdf/2312.06674) as my baseline. As they reported in their paper, they achieved AUPRC of 0.626 on the ToxicChat dataset. I have searched for results from more recent Llama Guard 3 or 4, but I couldn't find a much improved score from them. So I'm going to assume Llama Guard 3/4 are achieving similar results on the dataset, until someone points me to their published data. 
 
-Even just to finetune the top 1 layer + the classification head is already outperforming Llama 2 Guard on AUPRC by a long shot. And the top performer in my tests is to finetune Phi-4 foundation model with r=32, with a AUPRC score of 0.87.
+Even just to finetune the top 1 layer + the classification head is already outperforming Llama 2 Guard on AUPRC by a long shot. And the top performer in my tests is to finetune Phi-4 foundation model with r=48, with a AUPRC score of 0.89. It is the best score on the dataset to my knowledge.
 
 | Backbone Model      | Backbone Params | Ft Method                       | Trainable Params | ACC  | Precision | Recall | F1   | ROC_AUC | AUPRC |
 |---------------------|-----------------|---------------------------------|------------------|------|-----------|--------|------|---------|-------|
@@ -102,7 +110,8 @@ Even just to finetune the top 1 layer + the classification head is already outpe
 | Phi-4-Mini-Instruct | 3.8B            | LoRA R=32+Classification Head   | 17.8M            | 0.97 | 0.76      | 0.74   | 0.75 | 0.98    | 0.82  |
 | Phi-4-Mini-Instruct | 3.8B            | LoRA R=64+Classification Head   | 35.7M            | 0.96 | 0.72      | 0.81   | 0.76 | 0.98    | 0.84  |
 | Phi-4               | 14B             | QLoRA R=16+Classification Head  | 21.3M            | 0.97 | 0.81      | 0.69   | 0.75 | 0.98    | 0.84  |
-| Phi-4               | 14B             | QLoRA R=32+Classification Head  | 42.6M            | 0.97 | 0.74      | 0.84   | 0.78 | 0.99    |**0.87**|
+| Phi-4               | 14B             | QLoRA R=32+Classification Head  | 42.6M            | 0.97 | 0.74      | 0.84   | 0.78 | 0.99    | 0.87  |
+| Phi-4               | 14B             | QLoRA R=48+Classification Head  | 63.9M            | 0.98 | 0.89      | 0.75   | 0.81 | 0.99    |**0.89**|
 
 ## Setup
 To set up the venv for training/testing:

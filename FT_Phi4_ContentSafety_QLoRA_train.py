@@ -1,3 +1,4 @@
+import math
 import os
 import torch
 import torch.nn as nn
@@ -13,17 +14,19 @@ from sklearn.metrics import (accuracy_score, precision_score,
                              average_precision_score)
 
 MODEL_NAME = "microsoft/phi-4"
-BATCH_SIZE = 1
-EPOCHS = 1
+OUTPUT_DIR = "./finetuned_phi4_content_safety_QLoRA"
 MAX_LEN = 1024
 NUM_CLASSES = 2
-OUTPUT_DIR = "./finetuned_phi4_content_safety_QLoRA"
+BATCH_SIZE = 1
+EPOCHS = 2
 GRADIENT_ACCUMULATION_STEPS = 4
+MIN_LR = 5e-6
+INITIAL_LR = 1e-4
 
 def create_model_and_tokenizer(tokenizer, device, local_rank, loss_fn=None): 
     # for QLoRA we load the backbone in 4-bit NF4 + LoRA adapters
     lora_config = LoraConfig(
-        r=32,
+        r=48,
         lora_alpha=32,
         lora_dropout=0.05,
         bias="none",
@@ -130,7 +133,9 @@ def create_dataloaders(tokenizer):
     return train_loader, eval_loader, train_sampler, eval_sampler, class_weights
 
 
-def train_one_epoch(model, loader, optimizer, device, log_every=100, gradient_accumulation_steps=1):
+def train_one_epoch(model, loader, optimizer, device, log_every=100,
+                    gradient_accumulation_steps=1, global_step=0,
+                    total_training_steps=1, initial_lr=INITIAL_LR, min_lr=MIN_LR):
     model.train()
 
     running_loss = torch.zeros(1, device=device)
@@ -150,8 +155,14 @@ def train_one_epoch(model, loader, optimizer, device, log_every=100, gradient_ac
         scaled_loss.backward()
 
         if step % gradient_accumulation_steps == 0:
+            if total_training_steps > 0:
+                progress = global_step / total_training_steps
+                lr = min_lr + (initial_lr - min_lr) * max(0.0, 1.0 - progress)
+                for param_group in optimizer.param_groups:
+                    param_group["lr"] = lr
             optimizer.step()
             optimizer.zero_grad()
+            global_step += 1
 
         last_step = step
 
@@ -167,13 +178,15 @@ def train_one_epoch(model, loader, optimizer, device, log_every=100, gradient_ac
             dist.all_reduce(running_total, op=dist.ReduceOp.SUM)
 
             if dist.get_rank() == 0:
+                current_lr = optimizer.param_groups[0]["lr"]
                 avg_loss = running_loss.item() / log_every / dist.get_world_size()
                 acc = running_correct.item() / running_total.item()
 
                 print(
                     f"Step {step:6d} | "
                     f"loss={avg_loss:.4f} | "
-                    f"acc={acc:.4f}"
+                    f"acc={acc:.4f} | "
+                    f"lr={current_lr:.6g}"
                 )
 
             running_loss.zero_()
@@ -181,8 +194,16 @@ def train_one_epoch(model, loader, optimizer, device, log_every=100, gradient_ac
             running_total.zero_()
 
     if last_step and last_step % gradient_accumulation_steps != 0:
+        if total_training_steps > 0:
+            progress = global_step / total_training_steps
+            lr = min_lr + (initial_lr - min_lr) * max(0.0, 1.0 - progress)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
         optimizer.step()
         optimizer.zero_grad()
+        global_step += 1
+
+    return global_step
 
 
 @torch.no_grad()
@@ -278,19 +299,28 @@ def main():
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=5e-4,      
+        lr=INITIAL_LR,
         weight_decay=0.01,
     )
+
+    num_batches = len(train_loader)
+    steps_per_epoch = math.ceil(num_batches / GRADIENT_ACCUMULATION_STEPS)
+    total_training_steps = steps_per_epoch * EPOCHS
+    global_step = 0
 
     for epoch in range(EPOCHS):
         train_sampler.set_epoch(epoch)
 
-        train_one_epoch(
+        global_step = train_one_epoch(
             model,
             train_loader,
             optimizer,
             device,
             gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+            global_step=global_step,
+            total_training_steps=total_training_steps,
+            initial_lr=INITIAL_LR,
+            min_lr=MIN_LR,
         )
 
         eval_sampler.set_epoch(epoch)
