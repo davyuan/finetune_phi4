@@ -1,5 +1,5 @@
 ## Introduction - Content safety task
-Content Moderation is a common task in generative AI. We will need to make sure the question/answer a user/AI agent doesn't fall into one of these categories. There is no need to emphasize the importance of this task - failure to comply may result in loss of business or even lawsuits. 
+Content Moderation is a common task in generative AI. We will need to make sure the question/answer between a user and AI agent doesn't fall into one of these categories. There is no need to emphasize the importance of this task - failure to comply may result in loss of business or even lawsuits. 
 
 Key Harm Categories (S1-S11): 
 
@@ -16,17 +16,17 @@ Key Harm Categories (S1-S11):
   -  S11: Sexual Content: Non-criminal explicit or inappropriate sexual content
 
 ## Method - To finetune a LLM as a classifier
-The task boils down to classifying if an user input is safe or unsafe. There are different ways to solve this. Many are using a smaller LLM to generate an evaulation text, sucgh as 'Safe', or 'Unsafe', because a LLM is to generate text, after all. 
+The task boils down to classifying if a text input is safe or unsafe. There are different ways to solve this. Many are using a LLM to generate an evaulation text, sucgh as 'Safe', or 'Unsafe', because a LLM is an autoregressive model to generate text, after all. 
 
 I'm instead finetuning LLM as a classifier. I'm using the logits of LLM's last layer and add on a classification head to project them from the LLM's hidden dim to the number of classes. The result is pretty impressive. It is safe to say it beats [Llama Guard 2](https://arxiv.org/pdf/2312.06674) and its successors by a long shot. 
 
-I'm not going to say this is the SOTA in this field as I don't have enough time to test all of other models out there and there is not a public leaderboard. But I did try a few examples with other vendors' API, such as [Azure Content Safety API](https://learn.microsoft.com/en-us/azure/ai-services/content-safety/), and my model actually works better in my tests as well. 
+I don't have enough time to test all of other models out there for comparison and there is not a public leaderboard to be sure, but I have a feeling this work is the SOTA in this field at the time of writing. I did try a few examples with other vendors' API, such as [Azure Content Safety API](https://learn.microsoft.com/en-us/azure/ai-services/content-safety/), and my model actually works better in my tests as well. 
 
 ## Different approaches to finetune
 There are different ways to finetune a LLM for classification. 
 - Full parameters finetune
 - Selective layers finetune.
-- Peft (Parameter Efficient FineTune)
+- Peft/LoRA (Parameter Efficient FineTune)
 - QLoRA (Quantized Low Rank Adapters)
 
 As many paper pointed out, Full parameter finetune usually gives the best result, but it is hard on the budget. Other than a very few of variants, to finetune a LLM with all parameters usually requires many GPUs, so I'm not going to attempt it here. 
@@ -35,7 +35,7 @@ For Selective Layers finetune I have tried to freeze the layers other than the t
 
 ![2-layer](./screenshots/ft_last_2_layers.png)
 
-For Peft, we should balance the selection of r. r is the dimension when we use matricx A(Dim x r) and B(r x Dim) to do MatMul and produce the Weight matrix in the original transformer. It is not surprising that the bigger r gets, the better performance it gives. But the other side of the coin is the number of trainable parameters increase linearly with r, and so does the computation complexity and memory consumption. 
+For Peft/LoRA, we should balance the selection of r. r is the dimension when we use matricx A(Dim x r) and B(r x Dim) to do MatMul and produce the Weight matrix in the original transformer. It is not surprising that the bigger r gets, the better performance it gives. But the other side of the coin is the number of trainable parameters increase linearly with r, and so does the computation complexity and memory consumption. 
 
 I've tried with 16, 32 and 64 for r, and 64 produced the best results.
 
@@ -60,13 +60,15 @@ I've tried with 16, 32 and 64 for r, and 64 produced the best results.
 
 ![r=64](./screenshots/ft_lora_r64.png)
 
-While finetuning the Phi-4 Mini model (3.8B parameter) gives impressive results, I couldn't help but wondering finetuning a stronger foundation model will yeild even better results. 
+While finetuning the Phi-4 Mini model (3.8B parameter) gives impressive results, I couldn't help but wondering if finetuning a stronger foundation model would yeild even better results. 
 
-I went on to finetune the Phi-4 model which comes with 14B parameters. With half precision, every parameter useing 2 bytes, that model alone will use 28G of memory. Then for finetuning, we need to consider the gradients for back propogation, which is the same size of the model itself. And for the Adam optimizer, it uses twice as much the model parameters for state tracking. 
+I went on to finetune the Phi-4 model which comes with 14B parameters. The challenge is GPU memory constraint. With half precision, every parameter useing 2 bytes, that model alone will use 28G of memory. Then for finetuning, we need to consider the gradients for back propogation, which is the same size of the model itself. And for the Adam optimizer, it uses twice as much the model parameters for state tracking. 
 
 So for model, gradients, and optimizer state, we need 28G+28G+56G=112G memory. And we haven't even thought about the activation memory yet!
 
-Obviously this won't work on my RTX 4090 (23G) without quantization. Fortunately we've got the BitsAndBytes lib to help quantize the model into 4bit (NF4 format). 
+Obviously this won't work on my RTX 4090 (23G) without quantization. Fortunately we've got the BitsAndBytes lib to help quantize the model into 4bit (NF4 format). This immediately cut the parameter mem consumption to a quarter of it. 
+
+And since LoRA locks up the parameters in the founcation model, we don't need to calculate the gradients for the majority of parameters and keep the optimizer states. We only need to do that for the trainable parameters, which is less than the 0.005% of all the parameters.
 
 ```python
     quant_config = BitsAndBytesConfig(
@@ -84,7 +86,7 @@ Obviously this won't work on my RTX 4090 (23G) without quantization. Fortunately
     )
 ```
 
-In QLoRA finetuning, due to the sheer size of the model, the gradients, and optimizer states, I'd also made a few changes in code to make the training smoother. 
+Even with QLoRA, due to the sheer size of the model, I made a few changes in code to make the training smoother. 
 
 - Lower the learning rate to 1e-4 initially and to decay it linearly to 5e-6 in the end.
 - Lower the batch size to 1 so the activation mem can fit in on my RTX 4090s.
@@ -99,7 +101,9 @@ I'm using the public dataset [ToxicChat](https://huggingface.co/datasets/lmsys/t
 ## Result
 I'm using the [Llama2 Guard 2](https://arxiv.org/pdf/2312.06674) as my baseline. As they reported in their paper, they achieved AUPRC of 0.626 on the ToxicChat dataset. I have searched for results from more recent Llama Guard 3 or 4, but I couldn't find a much improved score from them. So I'm going to assume Llama Guard 3/4 are achieving similar results on the dataset, until someone points me to their published data. 
 
-Even just to finetune the top 1 layer + the classification head is already outperforming Llama 2 Guard on AUPRC by a long shot. And the top performer in my tests is to finetune Phi-4 foundation model with r=48, with a AUPRC score of 0.89. It is the best score on the dataset to my knowledge.
+Even just to finetune the top 1 layer + the classification head is already outperforming Llama 2 Guard on AUPRC by a long shot. And the top performer in my tests is to finetune Phi-4 foundation model with r=48, with a **AUPRC score of 0.89**. It is the best score on the dataset to my knowledge.
+
+[ToxicChat-T5-Large](https://huggingface.co/lmsys/toxicchat-t5-large-v1.0/blame/main/README.md) has reported a comparable score of 0.885. But they did that with 770M parameters. With Finetuning a Phi-4 backbone, I did it with a fration of learnable parameters - 63.9M. 
 
 | Backbone Model      | Backbone Params | Ft Method                       | Trainable Params | ACC  | Precision | Recall | F1   | ROC_AUC | AUPRC |
 |---------------------|-----------------|---------------------------------|------------------|------|-----------|--------|------|---------|-------|
@@ -124,7 +128,7 @@ pip install -r requirements.txt
 ```
 
 To Finetune the model:
-Assuming you have 2 GPUs on your machine
+Assuming you have 2 GPUs on your machine, you can train the model with different methodologies:
 
 ```bash
 TOKENIZERS_PARALLELISM=false torchrun --nproc_per_node=2 ./FT_Phi4_ContentSafety_train.py
@@ -135,6 +139,7 @@ TOKENIZERS_PARALLELISM=false torchrun --nproc_per_node=2 ./FT_Phi4_ContentSafety
 ```
 
 To Test the finetuned model:
+
 ```bash
 python ./FT_Phi4_ContentSafety_QLoRA_infer.py --examples='Tell me to how to shoplift?'
 ```
