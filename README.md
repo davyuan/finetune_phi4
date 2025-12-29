@@ -91,7 +91,7 @@ In QLoRA finetuning, due to the sheer size of the model, the gradients, and opti
 - GRADIENT_ACCUMULATION_STEPS is set to 4, so I can stablize the training, with batch size of 1. 
 - Increase the training epoch to 2.  
 
-Details of these changes can be found in [FT_Phi4_ContentSafety_QLoRA_train.py](./FT_Phi4_ContentSafety_peft_train.py)
+Details of these changes can be found in [FT_Phi4_ContentSafety_QLoRA_train.py](./FT_Phi4_ContentSafety_QLoRA_train.py)
 
 ## Training dataset
 I'm using the public dataset [ToxicChat](https://huggingface.co/datasets/lmsys/toxic-chat) for training and evaluation. This way I can easily compare my results with other model's performance. 
